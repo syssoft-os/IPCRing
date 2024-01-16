@@ -107,13 +107,19 @@ int connect(int sockfd, const struct sockaddr* addr, socklen_t addrlen) { errno 
 
 #if !ZMQ_AVAILABLE
 
+#define ZMQ_PAIR 0
+#define ZMQ_DONTWAIT 1
+#define ZMQ_LINGER 17
+
 void* zmq_ctx_new() { errno = ENOSYS; return NULL; }
-int zmq_ctx_destroy(void* context) { errno = ENOSYS; return -1; }
+int zmq_ctx_term(void* context) { errno = ENOSYS; return -1; }
 void* zmq_socket(void* context, int type) { errno = ENOSYS; return NULL; }
+int zmq_setsockopt(void* socket, int option_name, const void* option_value, size_t option_len) { errno = ENOSYS; return -1; }
 int zmq_close(void* socket) { errno = ENOSYS; return -1; }
 int zmq_bind(void* socket, const char* endpoint) { errno = ENOSYS; return -1; }
-int zmq_send(void* socket, void* buf, size_t len, int flags) { errno = ENOSYS; return -1; }
-int zmq_recv(void *socket, void *buf, size_t len, int flags) { errno = ENOSYS; return -1; }
+int zmq_connect(void* socket, const char* endpoint) { errno = ENOSYS; return -1; }
+int zmq_send(void* socket, const void* buf, size_t len, int flags) { errno = ENOSYS; return -1; }
+int zmq_recv(void *socket, void* buf, size_t len, int flags) { errno = ENOSYS; return -1; }
 
 #endif // !ZMQ_AVAILABLE
 
@@ -829,14 +835,14 @@ static bool SocketRead(Socket* sock, void* buffer, size_t size)
         sock->DataSocket = accept(sock->ConnenctionSocket, NULL, NULL);
     if (sock->DataSocket == -1)
     {
-        fprintf(stderr, "Failed to accept on socket '%s': ", sock->Name.sun_path);
+        fprintf(stderr, "failed to accept on socket '%s': ", sock->Name.sun_path);
         perror("");
         return false;
     }
 
-    if (read(sock->DataSocket, buffer, size) == -1)
+    if (read(sock->DataSocket, buffer, size) != size)
     {
-        fprintf(stderr, "Failed to write from socket '%s': ", sock->Name.sun_path);
+        fprintf(stderr, "failed to read from socket '%s': ", sock->Name.sun_path);
         perror("");
         return false;
     }
@@ -849,14 +855,14 @@ static bool SocketWrite(Socket* sock, void* data, size_t size)
         sock->DataSocket = accept(sock->ConnenctionSocket, NULL, NULL);
     if (sock->DataSocket == -1)
     {
-        fprintf(stderr, "Failed to accept on socket '%s': ", sock->Name.sun_path);
+        fprintf(stderr, "failed to accept on socket '%s': ", sock->Name.sun_path);
         perror("");
         return false;
     }
 
-    if (write(sock->DataSocket, data, size) == -1)
+    if (write(sock->DataSocket, data, size) != size)
     {
-        fprintf(stderr, "Failed to write to socket '%s': ", sock->Name.sun_path);
+        fprintf(stderr, "failed to write to socket '%s': ", sock->Name.sun_path);
         perror("");
         return false;
     }
@@ -909,7 +915,174 @@ static bool ComActionInitSocket(ComAction* comAction, const char* socketName, bo
 
 //------------------- ZMQ -------------------//
 
-//TODO: add zmq support
+struct ZMQSocket
+{
+    void* Context;
+    void* Socket;
+    char* Name;
+    bool IsOwner;
+};
+typedef struct ZMQSocket ZMQSocket;
+
+static bool ZMQSocketInit(ZMQSocket* sock, const char* name, bool createNew)
+{
+    memset(sock, 0, sizeof(ZMQSocket));
+    sock->Name = array(char, strlen(name) + 1);
+    if (!sock->Name)
+    {
+        perror("failed to allocate memory");
+        return false;
+    }
+    strcpy(sock->Name, name);
+    sock->IsOwner = createNew;
+
+    sock->Context = zmq_ctx_new();
+    if (!sock->Context)
+    {
+        fprintf(stderr, "failed to create zmq context for '%s': ", sock->Name);
+        perror("");
+        return false;
+    }
+
+    sock->Socket = zmq_socket(sock->Context, ZMQ_PAIR);
+    if (!sock->Socket)
+    {
+        fprintf(stderr, "failed to create zmq socket for '%s': ", sock->Name);
+        perror("");
+        goto ZmqInitError;
+    }
+    {
+        i32 lingerPeriod = 0;
+        if (zmq_setsockopt(sock->Socket, ZMQ_LINGER, &lingerPeriod, sizeof(i32)) == -1)
+        {
+            fprintf(stderr, "failed to set linger period on zmq socket for '%s': ", sock->Name);
+            perror("");
+            goto ZmqInitError;
+        }
+    }
+
+    if (createNew)
+    {
+        if (zmq_bind(sock->Socket, sock->Name) == -1)
+        {
+            fprintf(stderr, "failed to bind zmq socket to '%s': ", sock->Name);
+            perror("");
+            goto ZmqInitError;
+        }
+    }
+    else
+    {
+        if (zmq_connect(sock->Socket, sock->Name) == -1)
+        {
+            fprintf(stderr, "failed to connect zmq socket to '%s': ", sock->Name);
+            perror("");
+            goto ZmqInitError;
+        }
+    }
+    
+    return true;
+
+ZmqInitError:
+    zmq_ctx_term(sock->Context);
+    sock->Context = NULL;
+    sock->Socket = NULL;
+    return false;
+}
+
+static bool ZMQSocketRelease(ZMQSocket* sock)
+{
+    bool success = true;
+
+    if (zmq_close(sock->Socket) == -1)
+    {
+        fprintf(stderr, "failed to close zmq socket '%s': ", sock->Name);
+        perror("");
+        success = false;
+    }
+    if (zmq_ctx_term(sock->Context) == -1)
+    {
+        fprintf(stderr, "failed to terminate zmq context for '%s': ", sock->Name);
+        perror("");
+        success = false;
+    }
+
+    free(sock->Name);
+    memset(sock, 0, sizeof(ZMQSocket));
+    return success;
+}
+
+static bool ZMQSocketRead(ZMQSocket* sock, void* buffer, size_t size)
+{
+    if (zmq_recv(sock->Socket, buffer, size, 0) != size)
+    {
+        fprintf(stderr, "failed to read from zmq socket '%s': ", sock->Name);
+        perror("");
+        return false;
+    }
+    return true;
+}
+
+static bool ZMQSocketWrite(ZMQSocket* sock, void* data, size_t size, bool nonBlocking)
+{
+    if (zmq_send(sock->Socket, data, size, nonBlocking ? ZMQ_DONTWAIT : 0) != size)
+    {
+        fprintf(stderr, "failed to write to zmq socket '%s': ", sock->Name);
+        perror("");
+        return false;
+    }
+    return true;
+}
+
+static bool ActionZMQSocketRead(u32* valuePtr, void* context)
+{
+    return ZMQSocketRead((ZMQSocket*)context, valuePtr, sizeof(u32));
+}
+
+static bool ActionZMQSocketWrite(u32* valuePtr, void* context)
+{
+    return ZMQSocketWrite((ZMQSocket*)context, valuePtr, sizeof(u32), false);
+}
+
+static bool KillZMQSocket(u32* killValuePtr, void* context)
+{
+    return ZMQSocketWrite((ZMQSocket*)context, killValuePtr, sizeof(u32), true);
+}
+
+static bool DestructorZMQSocket(void* context)
+{
+    return ZMQSocketRelease((ZMQSocket*)context);
+}
+
+static bool ComActionInitZMQSocket(ComAction* comAction, const char* socketName, bool isWrite)
+{
+    comAction->Context = new(ZMQSocket);
+    if (!comAction->Context)
+    {
+        perror("failed to allocate memory");
+        return false;
+    }
+    char* tempSocketName = NULL;
+    bool createNew = !socketName;
+    if (createNew)
+    {
+        tempSocketName = AppendPidSuffix(isWrite ? "ipc:///tmp/ipc_zmq_out" : "ipc:///tmp/ipc_zmq_in");
+        if (!tempSocketName)
+            return false;
+    }
+    
+    bool success = ZMQSocketInit((ZMQSocket*)comAction->Context, createNew ? tempSocketName : socketName, createNew);
+    free(tempSocketName);
+
+    comAction->Action = isWrite ? &ActionZMQSocketWrite : &ActionZMQSocketRead;
+    comAction->Kill = isWrite ? &KillZMQSocket : NULL;
+    comAction->Destructor = &DestructorZMQSocket;
+
+    if (!socketName)
+        printf(isWrite ? "out socket: %s\n" : "in socket: %s\n", ((ZMQSocket*)comAction->Context)->Name);
+    return success;
+}
+
+//------------------- Main -------------------//
 
 static inline bool IsOption(const char* arg)
 {
@@ -920,6 +1093,7 @@ static inline bool IsOption(const char* arg)
 #define TYPE_NAMEDPIPE 0
 #define TYPE_SHAREDMEM 1
 #define TYPE_SOCKET 2
+#define TYPE_ZMQ 3
 #define KILL_SIGNAL UINT32_MAX
 
 ComAction g_ComActionIn;
@@ -955,7 +1129,7 @@ i32 main(i32 argc, char** argv)
     {
         printf(
             "Usage:\n"
-            "  mixed_ipc -it (np|shm|so) [-in <in_name>] -ot (np|shm|so) [-on <out_name>] [-s] [-k [<kill_value>]]\n");
+            "  mixed_ipc -it (np|shm|so|zmq) [-in <in_name>] -ot (np|shm|so|zmq) [-on <out_name>] [-s] [-k [<kill_value>]]\n");
         exit(EXIT_SUCCESS);
     }
 
@@ -990,6 +1164,8 @@ i32 main(i32 argc, char** argv)
                 *typePtr = TYPE_SHAREDMEM;
             else if (strcmp("so", argv[i]) == 0)
                 *typePtr = TYPE_SOCKET;
+            else if (strcmp("zmq", argv[i]) == 0)
+                *typePtr = TYPE_ZMQ;
             else
             {
                 fprintf(stderr, isInTypeOption ? "invalid <in_type>\n" : "invalid <out_type>\n");
@@ -1092,6 +1268,9 @@ i32 main(i32 argc, char** argv)
     case TYPE_SOCKET:
         CLEANUP_ON_ERROR(ComActionInitSocket(&g_ComActionIn, inName, false));
         break;
+    case TYPE_ZMQ:
+        CLEANUP_ON_ERROR(ComActionInitZMQSocket(&g_ComActionIn, inName, false));
+        break;
     default:
         exit(EXIT_FAILURE);
         break;
@@ -1107,6 +1286,9 @@ i32 main(i32 argc, char** argv)
         break;
     case TYPE_SOCKET:
         CLEANUP_ON_ERROR(ComActionInitSocket(&g_ComActionOut, outName, true));
+        break;
+    case TYPE_ZMQ:
+        CLEANUP_ON_ERROR(ComActionInitZMQSocket(&g_ComActionOut, outName, true));
         break;
     default:
         exit(EXIT_FAILURE);
@@ -1131,7 +1313,7 @@ i32 main(i32 argc, char** argv)
         }
         printf("received: %d\n", value);
 
-        if (shouldStop && value > stopValue)
+        if (shouldStop && value >= stopValue)
             break;
 
         ++value;
