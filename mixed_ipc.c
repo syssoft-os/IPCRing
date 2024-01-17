@@ -1217,7 +1217,7 @@ i32 main(i32 argc, char** argv)
     {
         printf(
             "Usage:\n"
-            "  mixed_ipc -it (np|shm|so|zmq) [-in <in_name>] -ot (np|shm|so|zmq) [-on <out_name>] [-s] [-k [<kill_value>]]\n");
+            "  mixed_ipc -it (np|shm|so|zmq) [-in <in_name>] -ot (np|shm|so|zmq) [-on <out_name>] [-s] [-k [<stop_value>]]\n");
         exit(EXIT_SUCCESS);
     }
 
@@ -1314,9 +1314,9 @@ i32 main(i32 argc, char** argv)
                 continue;
             ++i;
 
-            char* killValueEnd = NULL;
-            stopValue = strtol(argv[i], &killValueEnd, 10);
-            if (killValueEnd == argv[i] || stopValue < 0)
+            char* stopValueEnd = NULL;
+            stopValue = strtol(argv[i], &stopValueEnd, 10);
+            if (stopValueEnd == argv[i] || stopValue < 0)
             {
                 fprintf(stderr, "invalid <stop_value>\n");
                 exit(EXIT_FAILURE);
