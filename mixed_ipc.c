@@ -23,6 +23,7 @@
 #endif
 
 #ifdef SYS_WIN
+
 #include <winsock2.h>
 #include <windows.h>
 #include <winerror.h>
@@ -217,12 +218,32 @@ static bool PipeWrite(Pipe pipe, const void* data, u32 size)
 
 //------------------- Named Pipe -------------------//
 
+#ifdef SYS_POSIX
+typedef i32 npipe_t;
+#define INVALID_HANDLE_VALUE (-1)
+#endif // SYS_POSIX
+#ifdef SYS_WIN
+typedef HANDLE npipe_t;
+#endif
+
+static void PrintLastPipeError()
+{
+#ifdef SYS_WIN
+    PrintWinErrorMessage(GetLastError());
+#else
+    perror("");
+#endif
+}
+
 struct NamedPipe
 {
     char* Name;
-    i32 PipeDesc;
+    npipe_t PipeDesc;
     bool IsOwner;
     bool IsWrite;
+#ifdef SYS_WIN
+    bool IsConnected;
+#endif
 };
 typedef struct NamedPipe NamedPipe;
 
@@ -243,12 +264,31 @@ static bool NamedPipeInit(NamedPipe* namedPipe, const char* name, bool isWrite, 
 
     if (createNew)
     {
-        if (mkfifo(namedPipe->Name, 0666) == -1)
+#ifdef SYS_POSIX
+        if (mkfifo(namedPipe->Name, 0666) == INVALID_HANDLE_VALUE)
         {
             fprintf(stderr, "failed to create pipe '%s': ", namedPipe->Name);
-            perror("");
+            PrintLastPipeError();
             return false;
         }
+#endif // SYS_POSIX
+#ifdef SYS_WIN
+        namedPipe->PipeDesc = CreateNamedPipeA(
+            name,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            0,
+            1,
+            sizeof(u32),
+            sizeof(u32),
+            0,
+            NULL);
+        if (namedPipe->PipeDesc == INVALID_HANDLE_VALUE)
+        {
+            fprintf(stderr, "failed to create pipe '%s': ", namedPipe->Name);
+            PrintLastPipeError();
+            return false;
+        }
+#endif // SYS_WIN
     }
 
     return true;
@@ -259,10 +299,11 @@ static bool NamedPipeRelease(NamedPipe* namedPipe)
     printf("destroying named pipe\n");
     bool success = true;
 
-    if (namedPipe->PipeDesc != -1 && close(namedPipe->PipeDesc) == -1)
+#ifdef SYS_POSIX
+    if (namedPipe->PipeDesc != INVALID_HANDLE_VALUE && close(namedPipe->PipeDesc) == -1)
     {
         fprintf(stderr, "failed to close pipe '%s': ", namedPipe->Name);
-        perror("");
+        PrintLastPipeError();
         success = false;
     }
     if (namedPipe->IsOwner)
@@ -270,28 +311,89 @@ static bool NamedPipeRelease(NamedPipe* namedPipe)
         if (namedPipe->Name && unlink(namedPipe->Name) == -1)
         {
             fprintf(stderr, "failed to unlink pipe '%s': ", namedPipe->Name);
-            perror("");
+            PrintLastPipeError();
             success = false;
         }
     }
+#elif defined(SYS_WIN)
+    //TODO: just let the OS clean up for now
+    /*if (namedPipe->PipeDesc != INVALID_HANDLE_VALUE && !DisconnectNamedPipe(namedPipe->PipeDesc))
+    {
+        fprintf(stderr, "failed to disconnect pipe '%s': ", namedPipe->Name);
+        PrintLastPipeError();
+        success = false;
+    }*/
+    /*if (namedPipe->PipeDesc != INVALID_HANDLE_VALUE && !CloseHandle(namedPipe->PipeDesc))
+    {
+        fprintf(stderr, "failed to close handle for pipe '%s': ", namedPipe->Name);
+        PrintLastPipeError();
+        success = false;
+    }*/
+#endif
 
+    free(namedPipe->Name);
     memset(namedPipe, 0, sizeof(NamedPipe));
-    namedPipe->PipeDesc = -1;
+    namedPipe->PipeDesc = INVALID_HANDLE_VALUE;
     return success;
+}
+
+static bool NamedPipeHasOpenCon(NamedPipe* namedPipe)
+{
+#ifdef SYS_POSIX
+    return namedPipe->PipeDesc != INVALID_HANDLE_VALUE;
+#elif defined(SYS_WIN)
+    return namedPipe->IsConnected;
+#endif
+    return false;
 }
 
 static bool NamedPipeRead(NamedPipe* namedPipe, void* outBuffer, size_t bufferSize)
 {
-    if (namedPipe->PipeDesc == -1)
+    if (!NamedPipeHasOpenCon(namedPipe))
+    {
+#ifdef SYS_POSIX
         namedPipe->PipeDesc = open(namedPipe->Name, O_RDONLY);
-    if (namedPipe->PipeDesc == -1)
+#endif
+#ifdef SYS_WIN
+        if (namedPipe->IsOwner)
+        {
+            namedPipe->IsConnected = ConnectNamedPipe(namedPipe->PipeDesc, NULL);
+            namedPipe->IsConnected |= GetLastError() == ERROR_PIPE_CONNECTED;
+        }
+        else
+        {
+            namedPipe->PipeDesc = CreateFile(
+                namedPipe->Name,// pipe name 
+                GENERIC_READ |  // read and write access 
+                GENERIC_WRITE,
+                0,              // no sharing 
+                NULL,           // default security attributes
+                OPEN_EXISTING,  // opens existing pipe 
+                0,              // default attributes 
+                NULL);          // no template file
+            namedPipe->IsConnected = namedPipe->PipeDesc != INVALID_HANDLE_VALUE;
+        }
+#endif
+    }
+    if (!NamedPipeHasOpenCon(namedPipe))
     {
         fprintf(stderr, "failed to open pipe '%s': ", namedPipe->Name);
-        perror("");
+        PrintLastPipeError();
         return false;
     }
 
+#ifdef SYS_POSIX
     i32 bytesRead = read(namedPipe->PipeDesc, outBuffer, bufferSize);
+#elif defined(SYS_WIN)
+    DWORD uBytesRead = 0;
+    BOOL readDone = ReadFile(
+        namedPipe->PipeDesc,
+        outBuffer,
+        bufferSize,
+        &uBytesRead,
+        NULL);
+    i32 bytesRead = readDone ? (i32)uBytesRead : -1;
+#endif
     if (bytesRead != bufferSize)
     {
         if (bytesRead == 0)
@@ -299,7 +401,7 @@ static bool NamedPipeRead(NamedPipe* namedPipe, void* outBuffer, size_t bufferSi
         else
         {
             fprintf(stderr, "failed to read from pipe '%s': ", namedPipe->Name);
-            perror("");
+            PrintLastPipeError();
         }
         return false;
     }
@@ -309,22 +411,50 @@ static bool NamedPipeRead(NamedPipe* namedPipe, void* outBuffer, size_t bufferSi
 
 static bool NamedPipeWrite(NamedPipe* namedPipe, const void* inBuffer, size_t bufferSize, bool nonBlocking)
 {
-    if (namedPipe->PipeDesc == -1)
+    if (!NamedPipeHasOpenCon(namedPipe))
+    {
+#ifdef SYS_POSIX
         namedPipe->PipeDesc = open(namedPipe->Name, O_WRONLY | (nonBlocking ? O_NONBLOCK : 0));
-    if (namedPipe->PipeDesc == -1)
+#endif
+#ifdef SYS_WIN
+        if (namedPipe->IsOwner)
+        {
+            if (!nonBlocking)
+            {
+                namedPipe->IsConnected = ConnectNamedPipe(namedPipe->PipeDesc, NULL);
+                namedPipe->IsConnected |= GetLastError() == ERROR_PIPE_CONNECTED;
+            }
+        }
+        else
+        {
+            namedPipe->PipeDesc = CreateFile(
+                namedPipe->Name,   // pipe name 
+                GENERIC_READ |  // read and write access 
+                GENERIC_WRITE,
+                0,              // no sharing 
+                NULL,           // default security attributes
+                OPEN_EXISTING,  // opens existing pipe 
+                0,              // default attributes 
+                NULL);          // no template file
+            namedPipe->IsConnected = namedPipe->PipeDesc != INVALID_HANDLE_VALUE;
+        }
+#endif
+    }
+    if (!NamedPipeHasOpenCon(namedPipe))
     {
         fprintf(stderr, "failed to open pipe '%s': ", namedPipe->Name);
-        perror("");
+        PrintLastPipeError();
         return false;
     }
 
     if (nonBlocking)
     {
+#ifdef SYS_POSIX
         i32 flags = fcntl(namedPipe->PipeDesc, F_GETFD);
         if (flags == -1)
         {
             fprintf(stderr, "failed to read flags of pipe '%s': ", namedPipe->Name);
-            perror("");
+            PrintLastPipeError();
             return false;
         }
 
@@ -332,27 +462,49 @@ static bool NamedPipeWrite(NamedPipe* namedPipe, const void* inBuffer, size_t bu
         if (fcntl(namedPipe->PipeDesc, F_SETFD, flags) == -1)
         {
             fprintf(stderr, "failed to set flags of pipe '%s': ", namedPipe->Name);
-            perror("");
+            PrintLastPipeError();
             return false;
         }
+#endif // SYS_POSIX
+#ifdef SYS_WIN
+        DWORD mode = PIPE_NOWAIT;
+        if (SetNamedPipeHandleState(namedPipe->PipeDesc, &mode, 0, 0))
+        {
+            fprintf(stderr, "failed to set flags of pipe '%s': ", namedPipe->Name);
+            PrintLastPipeError();
+            return false;
+        }
+#endif
     }
 
     bool success = true;
+#ifdef SYS_POSIX
     i32 bytesWritten = write(namedPipe->PipeDesc, inBuffer, bufferSize);
+#elif defined(SYS_WIN)
+    DWORD uBytesWritten = 0;
+    BOOL writeDone = WriteFile(
+        namedPipe->PipeDesc,
+        inBuffer,
+        bufferSize,
+        &uBytesWritten,
+        NULL);
+    i32 bytesWritten = writeDone ? (i32)uBytesWritten : -1;
+#endif
     if (bytesWritten != bufferSize)
     {
         fprintf(stderr, "failed to write to pipe '%s': ", namedPipe->Name);
-        perror("");
+        PrintLastPipeError();
         success = false;
     }
 
     if (nonBlocking)
     {
+#ifdef SYS_POSIX
         i32 flags = fcntl(namedPipe->PipeDesc, F_GETFD);
         if (flags == -1)
         {
             fprintf(stderr, "failed to read flags of pipe '%s': ", namedPipe->Name);
-            perror("");
+            PrintLastPipeError();
             return false;
         }
 
@@ -360,9 +512,19 @@ static bool NamedPipeWrite(NamedPipe* namedPipe, const void* inBuffer, size_t bu
         if (fcntl(namedPipe->PipeDesc, F_SETFD, flags) == -1)
         {
             fprintf(stderr, "failed to set flags of pipe '%s': ", namedPipe->Name);
-            perror("");
+            PrintLastPipeError();
             return false;
         }
+#endif // SYS_POSIX
+#ifdef SYS_WIN
+        DWORD mode = PIPE_WAIT;
+        if (SetNamedPipeHandleState(namedPipe->PipeDesc, &mode, 0, 0))
+        {
+            fprintf(stderr, "failed to set flags of pipe '%s': ", namedPipe->Name);
+            PrintLastPipeError();
+            return false;
+        }
+#endif
     }
 
     return success;
@@ -401,7 +563,11 @@ static bool ComActionInitNamedPipe(ComAction* comAction, const char* pipeName, b
     bool createNew = !pipeName;
     if (createNew)
     {
+#ifdef SYS_WIN
+        tempPipeName = AppendPidSuffix(isWrite ? "//./pipe/ipc_pipe_out" : "//./pipe/ipc_pipe_in");
+#else
         tempPipeName = AppendPidSuffix(isWrite ? "ipc_pipe_out" : "ipc_pipe_in");
+#endif
         if (!tempPipeName)
             return false;
     }
@@ -724,7 +890,8 @@ typedef i32 socket_t;
 #define SockUnlink unlink
 #define INVALID_SOCKET (-1)
 
-#elif defined(SYS_WIN)
+#endif
+#ifdef SYS_WIN
 
 typedef SOCKET socket_t;
 #define SockClose closesocket
@@ -754,8 +921,8 @@ static bool SocketInit(Socket* sock, const char* name, bool createNew)
 {
     memset(sock, 0, sizeof(Socket));
     sock->IsOwner = createNew;
-    sock->ConnenctionSocket = -1;
-    sock->DataSocket = -1;
+    sock->ConnenctionSocket = INVALID_SOCKET;
+    sock->DataSocket = INVALID_SOCKET;
 
     if (createNew)
     {
@@ -861,7 +1028,7 @@ static bool SocketRead(Socket* sock, void* buffer, size_t size)
 #ifdef SYS_POSIX
     if (read(sock->DataSocket, buffer, size) != size)
 #elif defined(SYS_WIN)
-    if (recv(sock->DataSocket, buffer, size, 0) != size)
+    if (recv(sock->DataSocket, (char*)buffer, size, 0) != size)
 #endif
     {
         fprintf(stderr, "failed to read from socket '%s': ", sock->Name.sun_path);
@@ -891,7 +1058,8 @@ static bool SocketWrite(Socket* sock, void* data, size_t size, bool nonBlocking)
             PrintLastSocketError();
             return false;
         }
-#elif defined(SYS_POSIX)
+#endif // SYS_WIN
+#ifdef SYS_POSIX
         i32 flags = fcntl(sock->ConnenctionSocket, F_GETFL);
         if (flags == -1)
         {
@@ -915,7 +1083,7 @@ static bool SocketWrite(Socket* sock, void* data, size_t size, bool nonBlocking)
             PrintLastSocketError();
             return false;
         }
-#endif // defined(SYS_POSIX)
+#endif // SYS_POSIX
     }
     if (sock->DataSocket == -1)
     {
@@ -927,7 +1095,7 @@ static bool SocketWrite(Socket* sock, void* data, size_t size, bool nonBlocking)
 #ifdef SYS_POSIX
     if (write(sock->DataSocket, data, size) != size)
 #elif defined(SYS_WIN)
-    if (send(sock->DataSocket, data, size, 0) != size)
+    if (send(sock->DataSocket, (const char*)data, size, 0) != size)
 #endif
     {
         fprintf(stderr, "failed to write to socket '%s': ", sock->Name.sun_path);
@@ -969,7 +1137,6 @@ static bool ComActionInitSocket(ComAction* comAction, const char* socketName, bo
     bool createNew = !socketName;
     if (createNew)
     {
-        /*tempSocketName = AppendPidSuffix(isWrite ? "/tmp/ipc_socket_out" : "/tmp/ipc_socket_in");*/
         tempSocketName = AppendPidSuffix(isWrite ? "ipc_socket_out" : "ipc_socket_in");
         if (!tempSocketName)
             return false;
@@ -1139,7 +1306,7 @@ static bool ComActionInitZMQSocket(ComAction* comAction, const char* socketName,
     bool createNew = !socketName;
     if (createNew)
     {
-        tempSocketName = AppendPidSuffix(isWrite ? "ipc:///tmp/ipc_zmq_out" : "ipc:///tmp/ipc_zmq_in");
+        tempSocketName = AppendPidSuffix(isWrite ? "ipc:///tmp/ipc_zmq_out" : "ipc:///tmp/ipc_zmq_in"); // these names may not work on windows
         if (!tempSocketName)
             return false;
     }
@@ -1202,9 +1369,12 @@ static BOOL WINAPI CtrlHandler(DWORD ctrlType)
     {
         printf("\nCleaning up:\n");
         ComActionRelease(&g_ComActionIn);
+        printf("got here 1\n");
         if (g_ShouldKill && ComActionKill(&g_ComActionOut, KILL_SIGNAL))
             printf("sent: kill\n");
+        printf("got here 2\n");
         ComActionRelease(&g_ComActionOut);
+        printf("got here 3\n");
 
         if (g_InType == TYPE_SOCKET || g_OutType == TYPE_SOCKET)
             WSACleanup();

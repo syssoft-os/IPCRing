@@ -23,6 +23,6 @@ Run ``./mixed_ipc -it (np|shm|so|zmq) [-in <in_name>] -ot (np|shm|so|zmq) [-on <
 - ``-k`` (optional): Indicates that the program should propagate a kill signal upon closing.
 If ``<stop_value>`` is specified the program terminates after the counter has reached the given number.
 
-Note that IPC mechanisms like Signals and Message Queues are not supported,
+Note that IPC mechanisms like **signals** and **message queues** are not supported,
 because **WSL** was used for testing, wich currently does not implement them.\
-On **Windows** only Sockets are supported.
+On **Windows** only ``np`` (named pipes) and ``so`` (sockets) are supported.
