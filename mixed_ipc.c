@@ -722,6 +722,7 @@ static bool ComActionInitMemoryBlock(ComAction* comAction, const char* blockName
 typedef i32 socket_t;
 #define SockClose close
 #define SockUnlink unlink
+#define INVALID_SOCKET (-1)
 
 #elif defined(SYS_WIN)
 
@@ -759,7 +760,7 @@ static bool SocketInit(Socket* sock, const char* name, bool createNew)
     if (createNew)
     {
         sock->ConnenctionSocket = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (sock->ConnenctionSocket == -1)
+        if (sock->ConnenctionSocket == INVALID_SOCKET)
         {
             fprintf(stderr, "failed to create socket '%s': ", name);
             PrintLastSocketError();
@@ -789,7 +790,7 @@ static bool SocketInit(Socket* sock, const char* name, bool createNew)
     else
     {
         sock->DataSocket = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (sock->DataSocket == -1)
+        if (sock->DataSocket == INVALID_SOCKET)
         {
             fprintf(stderr, "failed to create socket '%s': ", name);
             PrintLastSocketError();
@@ -816,7 +817,7 @@ static bool SocketRelease(Socket* sock)
     bool success = true;
     printf("destroying socket\n");
 
-    if (sock->DataSocket != -1 && SockClose(sock->DataSocket) == -1)
+    if (sock->DataSocket != INVALID_SOCKET && SockClose(sock->DataSocket) == -1)
     {
         fprintf(stderr, "failed to close data connect on socket '%s': ", sock->Name.sun_path);
         PrintLastSocketError();
@@ -825,7 +826,7 @@ static bool SocketRelease(Socket* sock)
 
     if (sock->IsOwner)
     {
-        if (sock->ConnenctionSocket != -1 && SockClose(sock->ConnenctionSocket) == -1)
+        if (sock->ConnenctionSocket != INVALID_SOCKET && SockClose(sock->ConnenctionSocket) == -1)
         {
             fprintf(stderr, "failed to close socket '%s': ", sock->Name.sun_path);
             PrintLastSocketError();
@@ -840,17 +841,17 @@ static bool SocketRelease(Socket* sock)
     }
 
     memset(sock, 0, sizeof(Socket));
-    sock->ConnenctionSocket = -1;
-    sock->DataSocket = -1;
+    sock->ConnenctionSocket = INVALID_SOCKET;
+    sock->DataSocket = INVALID_SOCKET;
 
     return success;
 }
 
 static bool SocketRead(Socket* sock, void* buffer, size_t size)
 {
-    if (sock->IsOwner && sock->DataSocket == -1)
+    if (sock->IsOwner && sock->DataSocket == INVALID_SOCKET)
         sock->DataSocket = accept(sock->ConnenctionSocket, NULL, NULL);
-    if (sock->DataSocket == -1)
+    if (sock->DataSocket == INVALID_SOCKET)
     {
         fprintf(stderr, "failed to accept on socket '%s': ", sock->Name.sun_path);
         PrintLastSocketError();
@@ -872,25 +873,37 @@ static bool SocketRead(Socket* sock, void* buffer, size_t size)
 
 static bool SocketWrite(Socket* sock, void* data, size_t size, bool nonBlocking)
 {
-    if (sock->IsOwner && sock->DataSocket == -1)
+    if (sock->IsOwner && sock->DataSocket == INVALID_SOCKET)
     {
 #ifdef SYS_WIN
         u_long flags = 1;
-        ioctlsocket(sock->ConnenctionSocket, FIONBIO, &flags);
+        if (ioctlsocket(sock->ConnenctionSocket, FIONBIO, &flags) == SOCKET_ERROR)
+        {
+            fprintf(stderr, "failed to set flag of socket '%s': ", sock->Name.sun_path);
+            PrintLastSocketError();
+            return false;
+        }
         sock->DataSocket = accept(sock->ConnenctionSocket, NULL, NULL);
         flags = 0;
-        ioctlsocket(sock->ConnenctionSocket, FIONBIO, &flags);
+        if (ioctlsocket(sock->ConnenctionSocket, FIONBIO, &flags) == SOCKET_ERROR)
+        {
+            fprintf(stderr, "failed to set flag of socket '%s': ", sock->Name.sun_path);
+            PrintLastSocketError();
+            return false;
+        }
 #elif defined(SYS_POSIX)
         i32 flags = fcntl(sock->ConnenctionSocket, F_GETFL);
         if (flags == -1)
         {
-            perror("fcntl get");
+            fprintf(stderr, "failed to read flags of socket '%s': ", sock->Name.sun_path);
+            PrintLastSocketError();
             return false;
         }
         i32 newFlags = flags | O_NONBLOCK;
         if (fcntl(sock->ConnenctionSocket, F_SETFL, newFlags) == -1)
         {
-            perror("fcntl set 1");
+            fprintf(stderr, "failed to set flags of socket '%s': ", sock->Name.sun_path);
+            PrintLastSocketError();
             return false;
         }
 
@@ -898,10 +911,11 @@ static bool SocketWrite(Socket* sock, void* data, size_t size, bool nonBlocking)
 
         if (fcntl(sock->ConnenctionSocket, F_SETFL, flags) == -1)
         {
-            perror("fcntl set 2");
+            fprintf(stderr, "failed to set flags of socket '%s': ", sock->Name.sun_path);
+            PrintLastSocketError();
             return false;
         }
-#endif
+#endif // defined(SYS_POSIX)
     }
     if (sock->DataSocket == -1)
     {
