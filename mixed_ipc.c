@@ -3,6 +3,9 @@
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
+#define WIN32_LEAN_AND_MEAN 
+#undef UNICODE
+#pragma comment(lib, "Ws2_32.lib")
 #elif defined(__unix__) || defined(__unix) || (defined(__APPLE__) && defined(__MACH__))
     #define SYS_POSIX
 #endif
@@ -20,7 +23,11 @@
 #endif
 
 #ifdef SYS_WIN
-
+#include <winsock2.h>
+#include <windows.h>
+#include <winerror.h>
+#include <ws2tcpip.h>
+#include <afunix.h>
 #include <io.h>
 
 typedef int pid_t;
@@ -29,8 +36,6 @@ typedef int key_t;
 typedef int64_t ssize_t;
 typedef size_t off_t;
 typedef int sem_t;
-typedef int sa_family_t;
-typedef int socklen_t;
 
 #define write _write
 #define read _read
@@ -49,23 +54,8 @@ typedef int socklen_t;
 #define MAP_SHARED 1
 #define MAP_FAILED ((void*)-1)
 
-#define AF_UNIX 1
-#define SOCK_SEQPACKET 5
-
-struct sockaddr_un
-{
-    sa_family_t sun_family;
-    char        sun_path[108];
-};
-
-struct sockaddr
-{
-    sa_family_t sa_family;
-    char        sa_data[14];
-};
-
 int fork() { errno = ENOSYS; return -1; }
-int getpid() { errno = ENOSYS; return -1; }
+pid_t getpid() { return (pid_t)GetCurrentProcessId(); }
 int mkfifo(const char* pathname, mode_t mode) { errno = ENOSYS; return -1; }
 int fcntl(int fd, int cmd, ... /* arg */) { errno = ENOSYS; return -1; }
 
@@ -83,11 +73,15 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
 int munmap(void* addr, size_t length) { errno = ENOSYS; return -1; }
 int ftruncate(int fd, off_t length) { errno = ENOSYS; return -1; }
 
-int socket(int domain, int type, int protocol) { errno = ENOSYS; return -1; }
-int bind(int sockfd, const struct sockaddr* addr, socklen_t addrlen) { errno = ENOSYS; return -1; }
-int listen(int sockfd, int backlog) { errno = ENOSYS; return -1; }
-int accept(int sockfd, struct sockaddr* addr, socklen_t* addrlen) { errno = ENOSYS; return -1; }
-int connect(int sockfd, const struct sockaddr* addr, socklen_t addrlen) { errno = ENOSYS; return -1; }
+static void PrintWinErrorMessage(DWORD errorMessageID)
+{
+    LPSTR messageBuffer = NULL;
+    size_t size = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        NULL, errorMessageID, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)&messageBuffer, 0, NULL);
+
+    fprintf(stderr, "%s\n", messageBuffer);
+    LocalFree(messageBuffer);
+}
 
 #endif // SYS_WIN
 #ifdef SYS_POSIX
@@ -723,14 +717,37 @@ static bool ComActionInitMemoryBlock(ComAction* comAction, const char* blockName
 
 //------------------- Sockets -------------------//
 
+#ifdef SYS_POSIX
+
+typedef i32 socket_t;
+#define SockClose close
+#define SockUnlink unlink
+
+#elif defined(SYS_WIN)
+
+typedef SOCKET socket_t;
+#define SockClose closesocket
+#define SockUnlink DeleteFileA
+
+#endif
+
 struct Socket
 {
-    i32 ConnenctionSocket;
-    i32 DataSocket;
+    socket_t ConnenctionSocket;
+    socket_t DataSocket;
     bool IsOwner;
     struct sockaddr_un Name;
 };
 typedef struct Socket Socket;
+
+static void PrintLastSocketError()
+{
+#ifdef SYS_WIN
+    PrintWinErrorMessage(WSAGetLastError());
+#else
+    perror("");
+#endif
+}
 
 static bool SocketInit(Socket* sock, const char* name, bool createNew)
 {
@@ -741,41 +758,41 @@ static bool SocketInit(Socket* sock, const char* name, bool createNew)
 
     if (createNew)
     {
-        sock->ConnenctionSocket = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+        sock->ConnenctionSocket = socket(AF_UNIX, SOCK_STREAM, 0);
         if (sock->ConnenctionSocket == -1)
         {
-            fprintf(stderr, "Failed to create socket '%s': ", name);
-            perror("");
+            fprintf(stderr, "failed to create socket '%s': ", name);
+            PrintLastSocketError();
             return false;
         }
 
         sock->Name.sun_family = AF_UNIX;
         strncpy(sock->Name.sun_path, name, sizeof(sock->Name.sun_path) - 1);
 
-        unlink(sock->Name.sun_path);
+        SockUnlink(sock->Name.sun_path);
         if (bind(sock->ConnenctionSocket, (const struct sockaddr*)&sock->Name, sizeof(sock->Name)) == -1)
         {
-            fprintf(stderr, "Failed to bind socket '%s': ", sock->Name.sun_path);
-            perror("");
-            close(sock->ConnenctionSocket);
+            fprintf(stderr, "failed to bind socket '%s': ", sock->Name.sun_path);
+            PrintLastSocketError();
+            SockClose(sock->ConnenctionSocket);
             return false;
         }
         if (listen(sock->ConnenctionSocket, 1) == -1)
         {
-            fprintf(stderr, "Failed to listen to socket '%s': ", sock->Name.sun_path);
-            perror("");
-            close(sock->ConnenctionSocket);
-            unlink(sock->Name.sun_path);
+            fprintf(stderr, "failed to listen to socket '%s': ", sock->Name.sun_path);
+            PrintLastSocketError();
+            SockClose(sock->ConnenctionSocket);
+            SockUnlink(sock->Name.sun_path);
             return false;
         }
     }
     else
     {
-        sock->DataSocket = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+        sock->DataSocket = socket(AF_UNIX, SOCK_STREAM, 0);
         if (sock->DataSocket == -1)
         {
-            fprintf(stderr, "Failed to create socket '%s': ", name);
-            perror("");
+            fprintf(stderr, "failed to create socket '%s': ", name);
+            PrintLastSocketError();
             return false;
         }
 
@@ -784,9 +801,9 @@ static bool SocketInit(Socket* sock, const char* name, bool createNew)
 
         if (connect(sock->DataSocket, (const struct sockaddr*)&sock->Name, sizeof(sock->Name)) == -1)
         {
-            fprintf(stderr, "Failed to connect to socket '%s': ", sock->Name.sun_path);
-            perror("");
-            close(sock->DataSocket);
+            fprintf(stderr, "failed to connect to socket '%s': ", sock->Name.sun_path);
+            PrintLastSocketError();
+            SockClose(sock->DataSocket);
             return false;
         }
     }
@@ -799,25 +816,25 @@ static bool SocketRelease(Socket* sock)
     bool success = true;
     printf("destroying socket\n");
 
-    if (sock->DataSocket != -1 && close(sock->DataSocket) == -1)
+    if (sock->DataSocket != -1 && SockClose(sock->DataSocket) == -1)
     {
-        fprintf(stderr, "Failed to close data connect on socket '%s': ", sock->Name.sun_path);
-        perror("");
+        fprintf(stderr, "failed to close data connect on socket '%s': ", sock->Name.sun_path);
+        PrintLastSocketError();
         success = false;
     }
 
     if (sock->IsOwner)
     {
-        if (sock->ConnenctionSocket != -1 && close(sock->ConnenctionSocket) == -1)
+        if (sock->ConnenctionSocket != -1 && SockClose(sock->ConnenctionSocket) == -1)
         {
-            fprintf(stderr, "Failed to close socket '%s': ", sock->Name.sun_path);
-            perror("");
+            fprintf(stderr, "failed to close socket '%s': ", sock->Name.sun_path);
+            PrintLastSocketError();
             success = false;
         }
-        if (sock->Name.sun_path[0] != 0 && unlink(sock->Name.sun_path) == -1)
+        if (sock->Name.sun_path[0] != 0 && SockUnlink(sock->Name.sun_path) == -1)
         {
-            fprintf(stderr, "Failed to unlink socket '%s': ", sock->Name.sun_path);
-            perror("");
+            fprintf(stderr, "failed to unlink socket '%s': ", sock->Name.sun_path);
+            PrintLastSocketError();
             success = false;
         }
     }
@@ -836,34 +853,71 @@ static bool SocketRead(Socket* sock, void* buffer, size_t size)
     if (sock->DataSocket == -1)
     {
         fprintf(stderr, "failed to accept on socket '%s': ", sock->Name.sun_path);
-        perror("");
+        PrintLastSocketError();
         return false;
     }
 
+#ifdef SYS_POSIX
     if (read(sock->DataSocket, buffer, size) != size)
+#elif defined(SYS_WIN)
+    if (recv(sock->DataSocket, buffer, size, 0) != size)
+#endif
     {
         fprintf(stderr, "failed to read from socket '%s': ", sock->Name.sun_path);
-        perror("");
+        PrintLastSocketError();
         return false;
     }
     return true;
 }
 
-static bool SocketWrite(Socket* sock, void* data, size_t size)
+static bool SocketWrite(Socket* sock, void* data, size_t size, bool nonBlocking)
 {
     if (sock->IsOwner && sock->DataSocket == -1)
+    {
+#ifdef SYS_WIN
+        u_long flags = 1;
+        ioctlsocket(sock->ConnenctionSocket, FIONBIO, &flags);
         sock->DataSocket = accept(sock->ConnenctionSocket, NULL, NULL);
+        flags = 0;
+        ioctlsocket(sock->ConnenctionSocket, FIONBIO, &flags);
+#elif defined(SYS_POSIX)
+        i32 flags = fcntl(sock->ConnenctionSocket, F_GETFL);
+        if (flags == -1)
+        {
+            perror("fcntl get");
+            return false;
+        }
+        i32 newFlags = flags | O_NONBLOCK;
+        if (fcntl(sock->ConnenctionSocket, F_SETFL, newFlags) == -1)
+        {
+            perror("fcntl set 1");
+            return false;
+        }
+
+        sock->DataSocket = accept(sock->ConnenctionSocket, NULL, NULL);
+
+        if (fcntl(sock->ConnenctionSocket, F_SETFL, flags) == -1)
+        {
+            perror("fcntl set 2");
+            return false;
+        }
+#endif
+    }
     if (sock->DataSocket == -1)
     {
         fprintf(stderr, "failed to accept on socket '%s': ", sock->Name.sun_path);
-        perror("");
+        PrintLastSocketError();
         return false;
     }
 
+#ifdef SYS_POSIX
     if (write(sock->DataSocket, data, size) != size)
+#elif defined(SYS_WIN)
+    if (send(sock->DataSocket, data, size, 0) != size)
+#endif
     {
         fprintf(stderr, "failed to write to socket '%s': ", sock->Name.sun_path);
-        perror("");
+        PrintLastSocketError();
         return false;
     }
     return true;
@@ -876,7 +930,12 @@ static bool ActionSocketRead(u32* valuePtr, void* context)
 
 static bool ActionSocketWrite(u32* valuePtr, void* context)
 {
-    return SocketWrite((Socket*)context, valuePtr, sizeof(u32));
+    return SocketWrite((Socket*)context, valuePtr, sizeof(u32), false);
+}
+
+static bool KillSocket(u32* valuePtr, void* context)
+{
+    return SocketWrite((Socket*)context, valuePtr, sizeof(u32), true);
 }
 
 static bool DestructorSocket(void* context)
@@ -896,7 +955,8 @@ static bool ComActionInitSocket(ComAction* comAction, const char* socketName, bo
     bool createNew = !socketName;
     if (createNew)
     {
-        tempSocketName = AppendPidSuffix(isWrite ? "/tmp/ipc_socket_out" : "/tmp/ipc_socket_in");
+        /*tempSocketName = AppendPidSuffix(isWrite ? "/tmp/ipc_socket_out" : "/tmp/ipc_socket_in");*/
+        tempSocketName = AppendPidSuffix(isWrite ? "ipc_socket_out" : "ipc_socket_in");
         if (!tempSocketName)
             return false;
     }
@@ -905,7 +965,7 @@ static bool ComActionInitSocket(ComAction* comAction, const char* socketName, bo
     free(tempSocketName);
 
     comAction->Action = isWrite ? &ActionSocketWrite : &ActionSocketRead;
-    comAction->Kill = isWrite ? &ActionSocketWrite : NULL;
+    comAction->Kill = isWrite ? &KillSocket : NULL;
     comAction->Destructor = &DestructorSocket;
 
     if (!socketName)
@@ -1099,6 +1159,8 @@ static inline bool IsOption(const char* arg)
 ComAction g_ComActionIn;
 ComAction g_ComActionOut;
 bool g_ShouldKill;
+i32 g_InType = TYPE_INVALID;
+i32 g_OutType = TYPE_INVALID;
 
 #define CLEANUP_ON_ERROR(_func) if (!_func) Shutdown(-2)
 
@@ -1110,13 +1172,39 @@ static void Shutdown(i32 signum)
         printf("sent: kill\n");
     ComActionRelease(&g_ComActionOut);
 
+#ifdef SYS_WIN
+    if (g_InType == TYPE_SOCKET || g_OutType == TYPE_SOCKET)
+        WSACleanup();
+#endif
+
     exit(signum != -1 ? EXIT_FAILURE : EXIT_SUCCESS);
 }
 
+#ifdef SYS_WIN
+
+static BOOL WINAPI CtrlHandler(DWORD ctrlType)
+{
+    if (ctrlType == CTRL_C_EVENT)
+    {
+        printf("\nCleaning up:\n");
+        ComActionRelease(&g_ComActionIn);
+        if (g_ShouldKill && ComActionKill(&g_ComActionOut, KILL_SIGNAL))
+            printf("sent: kill\n");
+        ComActionRelease(&g_ComActionOut);
+
+        if (g_InType == TYPE_SOCKET || g_OutType == TYPE_SOCKET)
+            WSACleanup();
+        return FALSE;
+    }
+    return FALSE;
+}
+
+#endif // SYS_WIN
+
 i32 main(i32 argc, char** argv)
 {
-    i32 inType = TYPE_INVALID;
-    i32 outType = TYPE_INVALID;
+    g_InType = TYPE_INVALID;
+    g_OutType = TYPE_INVALID;
     const char* inName = NULL;
     const char* outName = NULL;
 
@@ -1139,18 +1227,18 @@ i32 main(i32 argc, char** argv)
         bool isOutTypeOption = strcmp("-ot", argv[i]) == 0;
         if (isInTypeOption || isOutTypeOption)
         {
-            if (isInTypeOption && inType != TYPE_INVALID)
+            if (isInTypeOption && g_InType != TYPE_INVALID)
             {
                 fprintf(stderr, "repeat argument -it\n");
                 exit(EXIT_FAILURE);
             }
-            if (isOutTypeOption && outType != TYPE_INVALID)
+            if (isOutTypeOption && g_OutType != TYPE_INVALID)
             {
                 fprintf(stderr, "repeat argument -ot\n");
                 exit(EXIT_FAILURE);
             }
 
-            i32* typePtr = isInTypeOption ? &inType : &outType;
+            i32* typePtr = isInTypeOption ? &g_InType : &g_OutType;
             ++i;
             if (i >= argc || IsOption(argv[i]))
             {
@@ -1241,23 +1329,42 @@ i32 main(i32 argc, char** argv)
         exit(EXIT_FAILURE);
     }
 
-    if (inType == TYPE_INVALID)
+    if (g_InType == TYPE_INVALID)
         fprintf(stderr, "option '-it' missing\n");
-    if (outType == TYPE_INVALID)
+    if (g_OutType == TYPE_INVALID)
         fprintf(stderr, "option '-ot' missing\n");
-    if (inType == TYPE_INVALID || outType == TYPE_INVALID)
+    if (g_InType == TYPE_INVALID || g_OutType == TYPE_INVALID)
         exit(EXIT_FAILURE);
 
     g_ComActionIn = ComActionEmpty();
     g_ComActionOut = ComActionEmpty();
 
+#ifdef SYS_POSIX
     if (signal(SIGINT, &Shutdown) == SIG_ERR)
     {
         perror("failed to attach interrupt handler");
         exit(EXIT_FAILURE);
     }
+#elif defined(SYS_WIN)
+    if (g_InType == TYPE_SOCKET || g_OutType == TYPE_SOCKET)
+    {
+        WSADATA wsaData;
+        memset(&wsaData, 0, sizeof(WSADATA));
+        if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
+        {
+            perror("failed WSAStartup");
+            exit(EXIT_FAILURE);
+        }
+    }
 
-    switch (inType)
+    if (!SetConsoleCtrlHandler(&CtrlHandler, TRUE))
+    {
+        perror("failed to attach interrupt handler");
+        exit(EXIT_FAILURE);
+    }
+#endif
+
+    switch (g_InType)
     {
     case TYPE_NAMEDPIPE:
         CLEANUP_ON_ERROR(ComActionInitNamedPipe(&g_ComActionIn, inName, false));
@@ -1276,7 +1383,7 @@ i32 main(i32 argc, char** argv)
         break;
     }
 
-    switch (outType)
+    switch (g_OutType)
     {
     case TYPE_NAMEDPIPE:
         CLEANUP_ON_ERROR(ComActionInitNamedPipe(&g_ComActionOut, outName, true));
