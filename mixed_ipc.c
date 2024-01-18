@@ -3,9 +3,8 @@
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
-#define WIN32_LEAN_AND_MEAN 
-#undef UNICODE
-#pragma comment(lib, "Ws2_32.lib")
+    #define WIN32_LEAN_AND_MEAN
+    #pragma comment(lib, "Ws2_32.lib")
 #elif defined(__unix__) || defined(__unix) || (defined(__APPLE__) && defined(__MACH__))
     #define SYS_POSIX
 #endif
@@ -38,41 +37,7 @@ typedef int64_t ssize_t;
 typedef size_t off_t;
 typedef int sem_t;
 
-#define write _write
-#define read _read
-#define open _open
-#define unlink _unlink
-#define close _close
-
-#define O_NONBLOCK 2048
-#define F_GETFD 1
-#define F_SETFD 2
-
-#define SEM_FAILED NULL
-#define PROT_READ 1
-#define PROT_WRITE 2
-
-#define MAP_SHARED 1
-#define MAP_FAILED ((void*)-1)
-
-int fork() { errno = ENOSYS; return -1; }
 pid_t getpid() { return (pid_t)GetCurrentProcessId(); }
-int mkfifo(const char* pathname, mode_t mode) { errno = ENOSYS; return -1; }
-int fcntl(int fd, int cmd, ... /* arg */) { errno = ENOSYS; return -1; }
-
-int shm_open(const char* name, int oflag, mode_t mode) { errno = ENOSYS; return -1; }
-int shm_unlink(const char* name) { errno = ENOSYS; return -1; }
-
-sem_t* sem_open(const char* name, int oflag, mode_t mode, unsigned int value) { errno = ENOSYS; return SEM_FAILED; }
-int sem_close(sem_t* sem) { errno = ENOSYS; return -1; }
-int sem_unlink(const char* name) { errno = ENOSYS; return -1; }
-int sem_wait(sem_t* sem) { errno = ENOSYS; return -1; }
-int sem_post(sem_t* sem) { errno = ENOSYS; return -1; }
-int sem_getvalue(sem_t* sem, int* sval) { errno = ENOSYS; return -1; }
-
-void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset) { errno = ENOSYS; return MAP_FAILED; }
-int munmap(void* addr, size_t length) { errno = ENOSYS; return -1; }
-int ftruncate(int fd, off_t length) { errno = ENOSYS; return -1; }
 
 static void PrintWinErrorMessage(DWORD errorMessageID)
 {
@@ -178,44 +143,6 @@ static bool ComActionKill(ComAction* comAction, u32 killValue)
     return comAction->Kill ? (*comAction->Kill)(&killValue, comAction->Context) : true;
 }
 
-//------------------- Pipe -------------------//
-
-struct Pipe
-{
-    i32 HandleRead;
-    i32 HandleWrite;
-};
-typedef struct Pipe Pipe;
-
-static bool PipeInit(Pipe* inPipe, u32 size)
-{
-    i32 handles[2] = { -1, -1 };
-#ifdef SYS_WIN
-    i32 status = _pipe(handles, size, _O_BINARY);
-#endif
-#ifdef SYS_POSIX
-    i32 status = pipe(handles);
-#endif
-    inPipe->HandleRead = handles[0];
-    inPipe->HandleWrite = handles[1];
-    if (status == -1)
-    {
-        perror("failed to create unnamed pipe");
-        return false;
-    }
-    return true;
-}
-
-static bool PipeRead(Pipe pipe, void* data, u32 size)
-{
-    return read(pipe.HandleRead, data, size) != -1;
-}
-
-static bool PipeWrite(Pipe pipe, const void* data, u32 size)
-{
-    return write(pipe.HandleWrite, data, size) != -1;
-}
-
 //------------------- Named Pipe -------------------//
 
 #ifdef SYS_POSIX
@@ -250,7 +177,7 @@ typedef struct NamedPipe NamedPipe;
 static bool NamedPipeInit(NamedPipe* namedPipe, const char* name, bool isWrite, bool createNew)
 {
     memset(namedPipe, 0, sizeof(NamedPipe));
-    namedPipe->PipeDesc = -1;
+    namedPipe->PipeDesc = INVALID_HANDLE_VALUE;
     namedPipe->IsOwner = createNew;
     namedPipe->IsWrite = isWrite;
 
@@ -316,19 +243,7 @@ static bool NamedPipeRelease(NamedPipe* namedPipe)
         }
     }
 #elif defined(SYS_WIN)
-    //TODO: just let the OS clean up for now
-    /*if (namedPipe->PipeDesc != INVALID_HANDLE_VALUE && !DisconnectNamedPipe(namedPipe->PipeDesc))
-    {
-        fprintf(stderr, "failed to disconnect pipe '%s': ", namedPipe->Name);
-        PrintLastPipeError();
-        success = false;
-    }*/
-    /*if (namedPipe->PipeDesc != INVALID_HANDLE_VALUE && !CloseHandle(namedPipe->PipeDesc))
-    {
-        fprintf(stderr, "failed to close handle for pipe '%s': ", namedPipe->Name);
-        PrintLastPipeError();
-        success = false;
-    }*/
+    // just let the OS clean up for now
 #endif
 
     free(namedPipe->Name);
@@ -362,7 +277,7 @@ static bool NamedPipeRead(NamedPipe* namedPipe, void* outBuffer, size_t bufferSi
         }
         else
         {
-            namedPipe->PipeDesc = CreateFile(
+            namedPipe->PipeDesc = CreateFileA(
                 namedPipe->Name,// pipe name 
                 GENERIC_READ |  // read and write access 
                 GENERIC_WRITE,
@@ -389,7 +304,7 @@ static bool NamedPipeRead(NamedPipe* namedPipe, void* outBuffer, size_t bufferSi
     BOOL readDone = ReadFile(
         namedPipe->PipeDesc,
         outBuffer,
-        bufferSize,
+        (DWORD)bufferSize,
         &uBytesRead,
         NULL);
     i32 bytesRead = readDone ? (i32)uBytesRead : -1;
@@ -427,8 +342,8 @@ static bool NamedPipeWrite(NamedPipe* namedPipe, const void* inBuffer, size_t bu
         }
         else
         {
-            namedPipe->PipeDesc = CreateFile(
-                namedPipe->Name,   // pipe name 
+            namedPipe->PipeDesc = CreateFileA(
+                namedPipe->Name,// pipe name 
                 GENERIC_READ |  // read and write access 
                 GENERIC_WRITE,
                 0,              // no sharing 
@@ -485,7 +400,7 @@ static bool NamedPipeWrite(NamedPipe* namedPipe, const void* inBuffer, size_t bu
     BOOL writeDone = WriteFile(
         namedPipe->PipeDesc,
         inBuffer,
-        bufferSize,
+        (DWORD)bufferSize,
         &uBytesWritten,
         NULL);
     i32 bytesWritten = writeDone ? (i32)uBytesWritten : -1;
@@ -586,26 +501,57 @@ static bool ComActionInitNamedPipe(ComAction* comAction, const char* pipeName, b
 
 //------------------- Shared Memory -------------------//
 
+#ifdef SYS_POSIX
+
+typedef sem_t* nsem_t;
+typedef i32 shm_t;
+#define INVALID_SEMAPHORE SEM_FAILED
+#define INVALID_SHAREDMEM (-1)
+#define INVALID_SHAREDMEM_MAP MAP_FAILED
+
+#elif defined(SYS_WIN)
+
+typedef HANDLE nsem_t;
+typedef HANDLE shm_t;
+#define INVALID_SEMAPHORE NULL
+#define INVALID_SHAREDMEM NULL
+#define INVALID_SHAREDMEM_MAP NULL
+
+#endif
+
+static void PrintLastMemBlockError()
+{
+#ifdef SYS_WIN
+    PrintWinErrorMessage(GetLastError());
+#else
+    perror("");
+#endif
+}
+
 struct MemoryBlock
 {
     u32* Memory;
     char* BlockName;
-    i32 BlockDesc;
+    shm_t BlockDesc;
     char* SemaphoreReadName;
     char* SemaphoreWriteName;
-    sem_t* SemaphoreRead;
-    sem_t* SemaphoreWrite;
+    nsem_t SemaphoreRead;
+    nsem_t SemaphoreWrite;
     bool IsOwner;
+#ifdef SYS_WIN
+    HANDLE Mutex;
+#endif 
+
 };
 typedef struct MemoryBlock MemoryBlock;
 
 static bool MemoryBlockInit(MemoryBlock* memBlock, const char* blockName, const char* semReadName, const char* semWriteName, bool createNew)
 {
     memset(memBlock, 0, sizeof(MemoryBlock));
-    memBlock->BlockDesc = -1;
-    memBlock->SemaphoreRead = SEM_FAILED;
-    memBlock->SemaphoreWrite = SEM_FAILED;
-    memBlock->Memory = MAP_FAILED;
+    memBlock->BlockDesc = INVALID_SHAREDMEM;
+    memBlock->SemaphoreRead = INVALID_SEMAPHORE;
+    memBlock->SemaphoreWrite = INVALID_SEMAPHORE;
+    memBlock->Memory = INVALID_SHAREDMEM_MAP;
 
     memBlock->BlockName = array(char, strlen(blockName) + 1);
     if (!memBlock->BlockName)
@@ -633,57 +579,129 @@ static bool MemoryBlockInit(MemoryBlock* memBlock, const char* blockName, const 
 
     memBlock->IsOwner = createNew;
 
+#ifdef SYS_POSIX
     memBlock->BlockDesc = shm_open(memBlock->BlockName, (memBlock->IsOwner ? O_CREAT : 0) | O_RDWR, 0666);
-    if (memBlock->BlockDesc == -1)
+    if (memBlock->BlockDesc == INVALID_SHAREDMEM)
     {
-        fprintf(stderr, memBlock->IsOwner ? "failed to create shared memory '%s': " : "failed to open shared memory '%s': ", memBlock->BlockName);
-        perror("");
+        fprintf(stderr, createNew ? "failed to create shared memory '%s': " : "failed to open shared memory '%s': ", memBlock->BlockName);
+        PrintLastMemBlockError();
         return false;
     }
 
-    if (memBlock->IsOwner)
+    if (createNew)
     {
         if (ftruncate(memBlock->BlockDesc, sizeof(u32)) == -1)
         {
             fprintf(stderr, "failed to resize shared memory '%s': ", memBlock->BlockName);
-            perror("");
+            PrintLastMemBlockError();
             goto ShmCreateFail;
         }
     }
 
     memBlock->Memory = (u32*)mmap(NULL, sizeof(u32), PROT_READ | PROT_WRITE, MAP_SHARED, memBlock->BlockDesc, 0);
-    if (memBlock->Memory == MAP_FAILED)
+    if (memBlock->Memory == INVALID_SHAREDMEM_MAP)
     {
         fprintf(stderr, "failed to map shared memory '%s': ", memBlock->BlockName);
-        perror("");
+        PrintLastMemBlockError();
         goto ShmCreateFail;
     }
+#endif // SYS_POSIX
+#ifdef SYS_WIN
+    memBlock->Mutex = CreateMutexA(NULL, FALSE, NULL);
+    if (memBlock->Mutex == NULL)
+    {
+        fprintf(stderr, "failed to create mutex for '%s': ", memBlock->BlockName);
+        PrintLastMemBlockError();
+        return false;
+    }
 
+    if (createNew)
+    {
+        memBlock->BlockDesc = CreateFileMappingA(
+            INVALID_HANDLE_VALUE,    // use paging file
+            NULL,                    // default security
+            PAGE_READWRITE,          // read/write access
+            0,                       // maximum object size (high-order DWORD)
+            sizeof(u32),             // maximum object size (low-order DWORD)
+            memBlock->BlockName);    // name of mapping object
+    }
+    else
+        memBlock->BlockDesc = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, memBlock->BlockName);
+    if (memBlock->BlockDesc == INVALID_SHAREDMEM)
+    {
+        fprintf(stderr, createNew ? "failed to create shared memory '%s': " : "failed to open shared memory '%s': ", memBlock->BlockName);
+        PrintLastMemBlockError();
+        return false;
+    }
+
+    memBlock->Memory = (u32*)MapViewOfFile(memBlock->BlockDesc, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(u32));
+    if (memBlock->Memory == INVALID_SHAREDMEM_MAP)
+    {
+        fprintf(stderr, "failed to map shared memory '%s': ", memBlock->BlockName);
+        PrintLastMemBlockError();
+        goto ShmCreateFail;
+    }
+#endif // SYS_WIN
+
+#ifdef SYS_POSIX
     memBlock->SemaphoreRead = sem_open(memBlock->SemaphoreReadName, O_CREAT, 0666, 0);
-    if (memBlock->SemaphoreRead == SEM_FAILED)
+#elif defined(SYS_WIN)
+    if (createNew)
+    {
+        memBlock->SemaphoreRead = CreateSemaphoreA(NULL, 0, 1, memBlock->SemaphoreReadName);
+        if (memBlock->SemaphoreRead != INVALID_SEMAPHORE && GetLastError() == ERROR_ALREADY_EXISTS)
+            memBlock->SemaphoreRead = INVALID_SEMAPHORE;
+    }
+    else
+        memBlock->SemaphoreRead = OpenSemaphoreA(SEMAPHORE_ALL_ACCESS, TRUE, memBlock->SemaphoreReadName);
+#endif
+    if (memBlock->SemaphoreRead == INVALID_SEMAPHORE)
     {
         fprintf(stderr, "failed to open semaphore '%s': ", memBlock->SemaphoreReadName);
-        perror("");
+        PrintLastMemBlockError();
         goto ShmCreateFail;
     }
 
+#ifdef SYS_POSIX
     memBlock->SemaphoreWrite = sem_open(memBlock->SemaphoreWriteName, O_CREAT, 0666, 0);
-    if (memBlock->SemaphoreWrite == SEM_FAILED)
+#elif defined(SYS_WIN)
+    if (createNew)
+    {
+        memBlock->SemaphoreWrite = CreateSemaphoreA(NULL, 0, 1, memBlock->SemaphoreWriteName);
+        if (memBlock->SemaphoreWrite != INVALID_SEMAPHORE && GetLastError() == ERROR_ALREADY_EXISTS)
+            memBlock->SemaphoreWrite = INVALID_SEMAPHORE;
+    }
+    else
+        memBlock->SemaphoreWrite = OpenSemaphoreA(SEMAPHORE_ALL_ACCESS, TRUE, memBlock->SemaphoreWriteName);
+#endif
+    if (memBlock->SemaphoreWrite == INVALID_SEMAPHORE)
     {
         fprintf(stderr, "failed to open semaphore '%s': ", memBlock->SemaphoreWriteName);
-        perror("");
+        PrintLastMemBlockError();
         goto ShmCreateFail;
     }
 
     return true;
 
 ShmCreateFail:
+#ifdef SYS_POSIX
     close(memBlock->BlockDesc);
     if (memBlock->IsOwner)
         shm_unlink(memBlock->BlockName);
     sem_close(memBlock->SemaphoreRead);
     if (memBlock->IsOwner)
         sem_unlink(memBlock->SemaphoreReadName);
+#endif // SYS_POSIX
+#ifdef SYS_WIN
+    if (memBlock->Memory != INVALID_SHAREDMEM_MAP)
+        UnmapViewOfFile(memBlock->Memory);
+    CloseHandle(memBlock->BlockDesc);
+    if (memBlock->SemaphoreRead != INVALID_SEMAPHORE)
+        CloseHandle(memBlock->SemaphoreRead);
+    if (memBlock->SemaphoreWrite != INVALID_SEMAPHORE)
+        CloseHandle(memBlock->SemaphoreWrite);
+#endif // SYS_WIN
+
     return false;
 }
 
@@ -692,16 +710,17 @@ static bool MemoryBlockRelease(MemoryBlock* memBlock)
     bool success = true;
     printf("destroying memory block\n");
 
+#ifdef SYS_POSIX
     if (memBlock->SemaphoreRead != SEM_FAILED && sem_close(memBlock->SemaphoreRead) == -1)
     {
         fprintf(stderr, "failed to close semaphore '%s': ", memBlock->SemaphoreReadName);
-        perror("");
+        PrintLastMemBlockError();
         success = false;
     }
     if (memBlock->SemaphoreWrite != SEM_FAILED && sem_close(memBlock->SemaphoreWrite) == -1)
     {
         fprintf(stderr, "failed to close semaphore '%s': ", memBlock->SemaphoreWriteName);
-        perror("");
+        PrintLastMemBlockError();
         success = false;
     }
     if (memBlock->IsOwner)
@@ -709,13 +728,13 @@ static bool MemoryBlockRelease(MemoryBlock* memBlock)
         if (memBlock->SemaphoreReadName && sem_unlink(memBlock->SemaphoreReadName) == -1)
         {
             fprintf(stderr, "failed to unlink semaphore '%s': ", memBlock->SemaphoreReadName);
-            perror("");
+            PrintLastMemBlockError();
             success = false;
         }
         if (memBlock->SemaphoreReadName && sem_unlink(memBlock->SemaphoreWriteName) == -1)
         {
             fprintf(stderr, "failed to unlink semaphore '%s': ", memBlock->SemaphoreWriteName);
-            perror("");
+            PrintLastMemBlockError();
             success = false;
         }
     }
@@ -723,14 +742,14 @@ static bool MemoryBlockRelease(MemoryBlock* memBlock)
     if (memBlock->Memory != MAP_FAILED && munmap(memBlock->Memory, sizeof(u32)) == -1)
     {
         fprintf(stderr, "failed to unmap shared memory '%s': ", memBlock->BlockName);
-        perror("");
+        PrintLastMemBlockError();
         success = false;
     }
 
     if (memBlock->BlockDesc != -1 && close(memBlock->BlockDesc) == -1)
     {
         fprintf(stderr, "failed to close shared memory '%s': ", memBlock->BlockName);
-        perror("");
+        PrintLastMemBlockError();
         success = false;
     }
 
@@ -739,70 +758,159 @@ static bool MemoryBlockRelease(MemoryBlock* memBlock)
         if (shm_unlink(memBlock->BlockName) == -1)
         {
             fprintf(stderr, "failed to unlink shared memory '%s': ", memBlock->BlockName);
-            perror("");
+            PrintLastMemBlockError();
             success = false;
         }
     }
-    
+#endif // SYS_POSIX
+#ifdef SYS_WIN
+    WaitForSingleObject(memBlock->Mutex, INFINITE);
+    if (memBlock->Memory != INVALID_SHAREDMEM_MAP && !UnmapViewOfFile(memBlock->Memory))
+    {
+        fprintf(stderr, "failed to unmap shared memory '%s': ", memBlock->BlockName);
+        PrintLastMemBlockError();
+        success = false;
+    }
+    if (memBlock->BlockDesc != INVALID_SHAREDMEM && !CloseHandle(memBlock->BlockDesc))
+    {
+        fprintf(stderr, "failed to close shared memory '%s': ", memBlock->BlockName);
+        PrintLastMemBlockError();
+        success = false;
+    }
+    ReleaseMutex(memBlock->Mutex);
+    // semaphores and mutex can be cleaned up by OS
+#endif // SYS_WIN
+
     free(memBlock->BlockName);
     free(memBlock->SemaphoreReadName);
     free(memBlock->SemaphoreWriteName);
 
     memset(memBlock, 0, sizeof(MemoryBlock));
-    memBlock->BlockDesc = -1;
-    memBlock->SemaphoreRead = SEM_FAILED;
-    memBlock->SemaphoreWrite = SEM_FAILED;
-    memBlock->Memory = MAP_FAILED;
+    memBlock->BlockDesc = INVALID_SHAREDMEM;
+    memBlock->SemaphoreRead = INVALID_SEMAPHORE;
+    memBlock->SemaphoreWrite = INVALID_SEMAPHORE;
+    memBlock->Memory = INVALID_SHAREDMEM_MAP;
 
     return success;
 }
 
 static bool MemoryBlockRead(MemoryBlock* memBlock, u32* outValue)
 {
+#ifdef SYS_POSIX
     if (sem_post(memBlock->SemaphoreWrite) == -1)
+#elif defined(SYS_WIN)
+    if (!ReleaseSemaphore(memBlock->SemaphoreWrite, 1, NULL))
+#endif
     {
         fprintf(stderr, "failed to post to semaphore '%s': ", memBlock->SemaphoreWriteName);
-        perror("");
-        return false;
-    }
-    if (sem_wait(memBlock->SemaphoreRead) == -1)
-    {
-        fprintf(stderr, "failed to wait on semaphore '%s': ", memBlock->SemaphoreReadName);
-        perror("");
+        PrintLastMemBlockError();
         return false;
     }
 
+#ifdef SYS_POSIX
+    if (sem_wait(memBlock->SemaphoreRead) == -1)
+#elif defined(SYS_WIN)
+    if (WaitForSingleObject(memBlock->SemaphoreRead, INFINITE) != WAIT_OBJECT_0)
+#endif
+    {
+        fprintf(stderr, "failed to wait on semaphore '%s': ", memBlock->SemaphoreReadName);
+        PrintLastMemBlockError();
+        return false;
+    }
+
+#ifdef SYS_WIN
+    if (WaitForSingleObject(memBlock->Mutex, INFINITE) != WAIT_OBJECT_0)
+    {
+        fprintf(stderr, "failed to wait on mutex for '%s': ", memBlock->BlockName);
+        PrintLastMemBlockError();
+        return false;
+    }
+#endif
+
+    if (memBlock->Memory == INVALID_SHAREDMEM_MAP)
+    {
+        fprintf(stderr, "invalid memory mapping for '%s'\n", memBlock->BlockName);
+#ifdef SYS_WIN
+        ReleaseMutex(memBlock->Mutex);
+#endif
+        return false;
+    }
     *outValue = *memBlock->Memory;
+
+#ifdef SYS_WIN
+    if (!ReleaseMutex(memBlock->Mutex))
+    {
+        fprintf(stderr, "failed to release mutex for '%s': ", memBlock->BlockName);
+        PrintLastMemBlockError();
+        return false;
+    }
+#endif
+
     return true;
 }
 
 static bool MemoryBlockWrite(MemoryBlock* memBlock, u32 value, bool nonBlocking)
 {
+#ifdef SYS_POSIX
     if (nonBlocking)
     {
         i32 sumValue = 0;
         if (sem_getvalue(memBlock->SemaphoreWrite, &sumValue) == -1)
         {
             fprintf(stderr, "failed to get value of semaphore '%s': ", memBlock->SemaphoreWriteName);
-            perror("");
+            PrintLastMemBlockError();
             return false;
         }
         if (sumValue <= 0)
             return false;
     }
+
     if (sem_wait(memBlock->SemaphoreWrite) == -1)
+#elif defined(SYS_WIN)
+    if (WaitForSingleObject(memBlock->SemaphoreWrite, nonBlocking ? 0 : INFINITE) != WAIT_OBJECT_0)
+#endif
     {
         fprintf(stderr, "failed to wait on semaphore '%s': ", memBlock->SemaphoreWriteName);
-        perror("");
+        PrintLastMemBlockError();
         return false;
     }
 
+#ifdef SYS_WIN
+    if (WaitForSingleObject(memBlock->Mutex, INFINITE) != WAIT_OBJECT_0)
+    {
+        fprintf(stderr, "failed to wait on mutex for '%s': ", memBlock->BlockName);
+        PrintLastMemBlockError();
+        return false;
+    }
+#endif
+
+    if (memBlock->Memory == INVALID_SHAREDMEM_MAP)
+    {
+        fprintf(stderr, "invalid memory mapping for '%s'\n", memBlock->BlockName);
+#ifdef SYS_WIN
+        ReleaseMutex(memBlock->Mutex);
+#endif
+        return false;
+    }
     *memBlock->Memory = value;
 
+#ifdef SYS_WIN
+    if (!ReleaseMutex(memBlock->Mutex))
+    {
+        fprintf(stderr, "failed to release mutex for '%s': ", memBlock->BlockName);
+        PrintLastMemBlockError();
+        return false;
+    }
+#endif
+
+#ifdef SYS_POSIX
     if (sem_post(memBlock->SemaphoreRead) == -1)
+#elif defined(SYS_WIN)
+    if (!ReleaseSemaphore(memBlock->SemaphoreRead, 1, NULL))
+#endif
     {
         fprintf(stderr, "failed to post to semaphore '%s': ", memBlock->SemaphoreReadName);
-        perror("");
+        PrintLastMemBlockError();
         return false;
     }
     return true;
@@ -840,7 +948,12 @@ static bool ComActionInitMemoryBlock(ComAction* comAction, const char* blockName
     bool createNew = !blockName;
     if (createNew)
     {
+#ifdef SYS_WIN
+        tempBlockName = AppendPidSuffix(isWrite ? "Global/ipc_memory_out" : "Global/ipc_memory_in");
+#else
         tempBlockName = AppendPidSuffix(isWrite ? "/ipc_memory_out" : "/ipc_memory_in");
+#endif
+
         if (!tempBlockName)
             return false;
     }
@@ -1028,7 +1141,7 @@ static bool SocketRead(Socket* sock, void* buffer, size_t size)
 #ifdef SYS_POSIX
     if (read(sock->DataSocket, buffer, size) != size)
 #elif defined(SYS_WIN)
-    if (recv(sock->DataSocket, (char*)buffer, size, 0) != size)
+    if (recv(sock->DataSocket, (char*)buffer, (i32)size, 0) != size)
 #endif
     {
         fprintf(stderr, "failed to read from socket '%s': ", sock->Name.sun_path);
@@ -1095,7 +1208,7 @@ static bool SocketWrite(Socket* sock, void* data, size_t size, bool nonBlocking)
 #ifdef SYS_POSIX
     if (write(sock->DataSocket, data, size) != size)
 #elif defined(SYS_WIN)
-    if (send(sock->DataSocket, (const char*)data, size, 0) != size)
+    if (send(sock->DataSocket, (const char*)data, (i32)size, 0) != size)
 #endif
     {
         fprintf(stderr, "failed to write to socket '%s': ", sock->Name.sun_path);
@@ -1369,12 +1482,9 @@ static BOOL WINAPI CtrlHandler(DWORD ctrlType)
     {
         printf("\nCleaning up:\n");
         ComActionRelease(&g_ComActionIn);
-        printf("got here 1\n");
         if (g_ShouldKill && ComActionKill(&g_ComActionOut, KILL_SIGNAL))
             printf("sent: kill\n");
-        printf("got here 2\n");
         ComActionRelease(&g_ComActionOut);
-        printf("got here 3\n");
 
         if (g_InType == TYPE_SOCKET || g_OutType == TYPE_SOCKET)
             WSACleanup();

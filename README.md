@@ -2,7 +2,7 @@
 Implementing a logical ring of processes using different types of IPC mechanisms
 
 ## How to build
-Should build on **Windows** and **POSIX** systems. But most system calls raise ``ENOSYS`` on Windows.\
+Should build on **Windows** and **POSIX** systems. But ``fork`` calls raise ``ENOSYS`` on Windows.\
 To build on **POSIX** systems just run ``make``.\
 To build on **Windows** use your preferred way of building.
 
@@ -25,4 +25,4 @@ If ``<stop_value>`` is specified the program terminates after the counter has re
 
 Note that IPC mechanisms like **signals** and **message queues** are not supported,
 because **WSL** was used for testing, wich currently does not implement them.\
-On **Windows** only ``np`` (named pipes) and ``so`` (sockets) are supported.
+On **Windows** IPC mechanism ``zmq`` (ZeroMQ) is untested and may not work.
