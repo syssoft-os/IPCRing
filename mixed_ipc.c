@@ -777,7 +777,6 @@ static bool MemoryBlockRelease(MemoryBlock* memBlock)
         PrintLastMemBlockError();
         success = false;
     }
-    ReleaseMutex(memBlock->Mutex);
     // semaphores and mutex can be cleaned up by OS
 #endif // SYS_WIN
 
@@ -790,6 +789,10 @@ static bool MemoryBlockRelease(MemoryBlock* memBlock)
     memBlock->SemaphoreRead = INVALID_SEMAPHORE;
     memBlock->SemaphoreWrite = INVALID_SEMAPHORE;
     memBlock->Memory = INVALID_SHAREDMEM_MAP;
+
+#ifdef SYS_WIN
+    ReleaseMutex(memBlock->Mutex);
+#endif
 
     return success;
 }
